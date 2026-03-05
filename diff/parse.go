@@ -1,3 +1,4 @@
+// Package diff parses unified diff output into structured types for rendering.
 package diff
 
 import (
@@ -62,6 +63,7 @@ func Parse(raw string) []File {
 	return files
 }
 
+// splitFiles splits a multi-file unified diff into per-file chunks.
 func splitFiles(raw string) []string {
 	lines := strings.Split(raw, "\n")
 	var chunks []string
@@ -84,6 +86,7 @@ func splitFiles(raw string) []string {
 	return chunks
 }
 
+// parseFile parses a single file's diff chunk into a File struct.
 func parseFile(chunk string) *File {
 	lines := strings.Split(chunk, "\n")
 	f := &File{}
@@ -134,6 +137,8 @@ func parseFile(chunk string) *File {
 	return f
 }
 
+// parseHunk parses a hunk starting at the @@ header line. Returns the parsed
+// hunk and the number of lines consumed from the input.
 func parseHunk(lines []string) (*Hunk, int) {
 	if len(lines) == 0 || !strings.HasPrefix(lines[0], "@@") {
 		return nil, 1
@@ -222,6 +227,8 @@ func parseHunk(lines []string) (*Hunk, int) {
 	return h, consumed
 }
 
+// parseHunkHeader extracts line range info from an @@ header line.
+// Format: @@ -oldStart,oldCount +newStart,newCount @@
 func parseHunkHeader(header string) (oldStart, oldCount, newStart, newCount int) {
 	// Format: @@ -oldStart,oldCount +newStart,newCount @@
 	at := strings.Index(header, "@@")
@@ -246,6 +253,7 @@ func parseHunkHeader(header string) (oldStart, oldCount, newStart, newCount int)
 	return
 }
 
+// parseRange parses a "start,count" or "start" string into its components.
 func parseRange(s string) (start, count int) {
 	if idx := strings.Index(s, ","); idx >= 0 {
 		start, _ = strconv.Atoi(s[:idx])
@@ -257,6 +265,7 @@ func parseRange(s string) (start, count int) {
 	return
 }
 
+// countType returns the number of lines of the given type in the hunk.
 func (h *Hunk) countType(t LineType) int {
 	n := 0
 	for _, l := range h.Lines {

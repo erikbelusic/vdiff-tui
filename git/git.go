@@ -1,3 +1,4 @@
+// Package git provides functions for executing git commands and parsing their output.
 package git
 
 import (
@@ -72,7 +73,8 @@ func ChangedFiles(repoPath string) ([]ChangedFile, error) {
 	return files, nil
 }
 
-// FileDiff returns the unified diff for a single file.
+// FileDiff returns the unified diff output for a single file.
+// It tries unstaged changes first, then staged, handling added/deleted files specially.
 func FileDiff(repoPath string, file ChangedFile) (string, error) {
 	switch file.Status {
 	case "A":
@@ -108,6 +110,7 @@ func FileDiff(repoPath string, file ChangedFile) (string, error) {
 	}
 }
 
+// mapStatus converts git porcelain status codes to a single-character status string.
 func mapStatus(staged, unstaged byte) string {
 	switch {
 	case staged == 'R' || unstaged == 'R':
@@ -121,6 +124,8 @@ func mapStatus(staged, unstaged byte) string {
 	}
 }
 
+// fillStats populates the Additions and Deletions counts on each ChangedFile
+// by running git diff --numstat for both staged and unstaged changes.
 func fillStats(repoPath string, files []ChangedFile) error {
 	// Staged stats
 	stagedOut, _ := run(repoPath, "diff", "--cached", "--numstat")
@@ -162,6 +167,7 @@ func fillStats(repoPath string, files []ChangedFile) error {
 	return nil
 }
 
+// atoi parses a string to int, returning 0 for any non-numeric input.
 func atoi(s string) int {
 	n := 0
 	for _, c := range s {
@@ -172,6 +178,7 @@ func atoi(s string) int {
 	return n
 }
 
+// run executes a git command in the given repo directory and returns its stdout.
 func run(repoPath string, args ...string) (string, error) {
 	cmd := exec.Command("git", append([]string{"-C", repoPath}, args...)...)
 	out, err := cmd.Output()

@@ -10,8 +10,11 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// version is set at build time via -ldflags.
 var version = "dev"
 
+// main is the entry point. It parses CLI args, validates the target
+// directory is a git repo, and launches the Bubble Tea TUI.
 func main() {
 	repoPath, err := parseArgs()
 	if err != nil {
@@ -35,6 +38,8 @@ func main() {
 	}
 }
 
+// parseArgs processes CLI arguments and returns the resolved repo path.
+// Handles --help, --version flags and an optional positional path argument.
 func parseArgs() (string, error) {
 	args := os.Args[1:]
 
@@ -56,6 +61,7 @@ func parseArgs() (string, error) {
 	return os.Getwd()
 }
 
+// printUsage writes the help text to stdout.
 func printUsage() {
 	fmt.Println(`Usage: vdiff [path]
 
@@ -70,6 +76,7 @@ Flags:
   -v, --version    Show version`)
 }
 
+// validateGitRepo checks that the given path is a directory containing a git repository.
 func validateGitRepo(path string) error {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -87,8 +94,7 @@ func validateGitRepo(path string) error {
 	return nil
 }
 
-// --- Bubble Tea Model ---
-
+// model is the top-level Bubble Tea model holding all application state.
 type model struct {
 	repoPath string
 	repoName string
@@ -96,6 +102,7 @@ type model struct {
 	height   int
 }
 
+// newModel creates the initial model for the given repository path.
 func newModel(repoPath string) model {
 	return model{
 		repoPath: repoPath,
@@ -103,10 +110,13 @@ func newModel(repoPath string) model {
 	}
 }
 
+// Init returns the initial command to run when the program starts.
 func (m model) Init() tea.Cmd {
 	return nil
 }
 
+// Update handles incoming messages (key presses, window resizes) and returns
+// the updated model and any commands to execute.
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
@@ -123,6 +133,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// View renders the entire TUI to a string for display.
 func (m model) View() string {
 	if m.width == 0 {
 		return ""
