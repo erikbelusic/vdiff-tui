@@ -209,8 +209,10 @@ func loadFileDiff(repoPath string, file gitpkg.ChangedFile) tea.Cmd {
 	}
 }
 
-// Init returns the initial command to load git data on startup.
+// Init returns the initial command to load git data and saved comments on startup.
 func (m model) Init() tea.Cmd {
+	// Load saved comments (non-blocking, errors are silently ignored)
+	_ = m.commentStore.Load(m.repoPath)
 	return loadGitData(m.repoPath)
 }
 
@@ -233,6 +235,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.files = msg.files
 			m.branch = msg.branch
 			m.filesErr = ""
+			// Prune comments for files no longer in the diff
+			var paths []string
+			for _, f := range m.files {
+				paths = append(paths, f.Path)
+			}
+			m.commentStore.PruneFiles(paths)
+			_ = m.commentStore.Save(m.repoPath)
 			// Auto-select first file if available
 			if len(m.files) > 0 && m.fileIdx == 0 {
 				return m, loadFileDiff(m.repoPath, m.files[0])
@@ -421,6 +430,7 @@ func (m model) handleDiffViewKey(key string) (tea.Model, tea.Cmd) {
 				lineID := comments.LineID(dl.hunkIdx, dl.lineIdx)
 				if c := m.commentStore.CommentAtLineID(m.files[m.fileIdx].Path, lineID); c != nil {
 					m.commentStore.Delete(c.ID)
+					_ = m.commentStore.Save(m.repoPath)
 				}
 			}
 		}
@@ -548,6 +558,9 @@ func (m *model) saveComment() {
 			m.commentInput,
 		)
 	}
+
+	// Auto-save to disk
+	_ = m.commentStore.Save(m.repoPath)
 }
 
 // ensureCursorVisible adjusts scroll so the cursor is within the visible area.
