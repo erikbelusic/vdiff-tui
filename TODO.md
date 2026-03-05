@@ -188,6 +188,13 @@ type Comment struct {
 - [ ] Graceful terminal resize handling
 - [ ] Clean alternate screen buffer usage (enter on start, exit on quit)
 
+## Phase 10: Release & Distribution
+
+- [ ] Install instructions in README (go install, homebrew, binary releases)
+- [ ] goreleaser config for cross-platform builds
+- [ ] GitHub Actions CI (build + test)
+- [ ] Version embedding via `-ldflags`
+
 ---
 
 ## Layout Reference

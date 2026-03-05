@@ -26,7 +26,15 @@ vdiff --help    # Show usage
 vdiff --version # Show version
 ```
 
-## Requirements
+## Development
 
-- Go 1.26+ (managed via [mise](https://mise.jdx.dev/))
-- Git
+Requires Go 1.26+ (managed via [mise](https://mise.jdx.dev/)) and Git.
+
+```bash
+git clone https://github.com/erikbelusic/vdiff-tui.git
+cd vdiff-tui
+mise install          # installs Go 1.26 from mise.toml
+go run .              # run directly
+go run . /path/to/repo  # run against a specific repo
+go build -o vdiff .   # build binary
+```
