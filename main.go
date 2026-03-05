@@ -10,6 +10,10 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"time"
+
+	"github.com/atotto/clipboard"
+
 	"github.com/erikbelusic/vdiff-tui/comments"
 	"github.com/erikbelusic/vdiff-tui/diff"
 	gitpkg "github.com/erikbelusic/vdiff-tui/git"
@@ -150,6 +154,12 @@ type model struct {
 	visualStart   int      // start of visual selection (diffLines index)
 	commentInput  string   // text being typed
 	editCommentID int      // ID of comment being edited
+
+	// Prompt panel state
+	showPrompt   bool
+	compactMode  bool
+	flashMsg     string    // temporary status message (e.g., "Copied!")
+	flashExpiry  time.Time // when the flash message should disappear
 }
 
 // diffLine is a flattened representation of a line in the diff viewer,
@@ -189,6 +199,9 @@ type fileDiffMsg struct {
 	raw string
 	err error
 }
+
+// clearFlashMsg signals that a flash message should be cleared.
+type clearFlashMsg struct{}
 
 // --- Commands ---
 
@@ -249,6 +262,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case clearFlashMsg:
+		m.flashMsg = ""
+		return m, nil
+
 	case fileDiffMsg:
 		if msg.err != nil {
 			m.diffErr = msg.err.Error()
@@ -292,12 +309,28 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+c":
 		return m, tea.Quit
 	case "q":
+		if m.showPrompt {
+			m.showPrompt = false
+			return m, nil
+		}
 		return m, tea.Quit
 	case "tab", "shift+tab", "left", "right":
 		m.activePane = togglePane(m.activePane)
 		return m, nil
 	case "r":
 		return m, loadGitData(m.repoPath)
+	case "p":
+		m.showPrompt = !m.showPrompt
+		return m, nil
+	case "y":
+		if m.showPrompt && m.commentStore.Count() > 0 {
+			return m, m.copyPromptToClipboard()
+		}
+	case "f":
+		if m.showPrompt {
+			m.compactMode = !m.compactMode
+			return m, nil
+		}
 	}
 
 	// Pane-specific keybindings
@@ -626,6 +659,28 @@ func flattenDiffLines(files []diff.File) []diffLine {
 	return lines
 }
 
+// copyPromptToClipboard copies the formatted prompt to the system clipboard
+// and shows a flash message.
+func (m *model) copyPromptToClipboard() tea.Cmd {
+	var text string
+	if m.compactMode {
+		text = comments.ExportCompact(m.commentStore.All())
+	} else {
+		text = comments.ExportStandard(m.commentStore.All())
+	}
+
+	if err := clipboard.WriteAll(text); err != nil {
+		m.flashMsg = "Error: " + err.Error()
+	} else {
+		m.flashMsg = "Copied!"
+	}
+	m.flashExpiry = time.Now().Add(2 * time.Second)
+
+	return tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
+		return clearFlashMsg{}
+	})
+}
+
 // truncateToWidth truncates a string (possibly containing ANSI sequences) to a
 // given visible width. This is a simple approach that falls back to raw truncation
 // if the string doesn't contain escape sequences.
@@ -686,9 +741,21 @@ func (m model) View() string {
 	}
 
 	header := m.renderHeader()
-	body := m.renderBody()
 	status := m.renderStatus()
 
+	if m.showPrompt {
+		// Split: top 2/3 for body, bottom 1/3 for prompt panel
+		promptHeight := m.height / 3
+		if promptHeight < 5 {
+			promptHeight = 5
+		}
+		bodyHeight := m.height - 2 - promptHeight // minus header and status
+		body := m.renderBodyWithHeight(bodyHeight)
+		prompt := m.renderPromptPanel(promptHeight)
+		return header + "\n" + body + "\n" + prompt + "\n" + status
+	}
+
+	body := m.renderBody()
 	return header + "\n" + body + "\n" + status
 }
 
@@ -712,6 +779,11 @@ func (m model) renderHeader() string {
 // renderBody renders the main content area with file list and diff viewer side by side.
 func (m model) renderBody() string {
 	bodyHeight := m.height - 2 // minus header and status bar
+	return m.renderBodyWithHeight(bodyHeight)
+}
+
+// renderBodyWithHeight renders the main content area at the specified height.
+func (m model) renderBodyWithHeight(bodyHeight int) string {
 	if bodyHeight < 1 {
 		return ""
 	}
@@ -729,6 +801,65 @@ func (m model) renderBody() string {
 		Render(strings.Repeat("│\n", bodyHeight-1) + "│")
 
 	return lipgloss.JoinHorizontal(lipgloss.Top, fileList, separator, diffView)
+}
+
+// renderPromptPanel renders the bottom panel showing the formatted prompt output.
+func (m model) renderPromptPanel(height int) string {
+	borderStyle := lipgloss.NewStyle().
+		Foreground(colorBorder).
+		Width(m.width)
+
+	separator := borderStyle.Render(strings.Repeat("─", m.width))
+
+	// Title bar
+	titleParts := []string{
+		lipgloss.NewStyle().Bold(true).Foreground(colorText).Render("Prompt Output"),
+	}
+	if m.compactMode {
+		titleParts = append(titleParts,
+			lipgloss.NewStyle().Foreground(colorMuted).Render(" [compact]"))
+	}
+	titleParts = append(titleParts,
+		lipgloss.NewStyle().Foreground(colorMuted).Render("  ·  y: copy  ·  f: toggle format  ·  p: close"))
+
+	title := lipgloss.NewStyle().
+		Background(colorHeaderBg).
+		Width(m.width).
+		Padding(0, 1).
+		Render(strings.Join(titleParts, ""))
+
+	// Content
+	var content string
+	if m.commentStore.Count() == 0 {
+		content = lipgloss.NewStyle().
+			Foreground(colorMuted).
+			Padding(0, 1).
+			Render("No comments yet. Press c on a diff line to add one.")
+	} else {
+		var exported string
+		if m.compactMode {
+			exported = comments.ExportCompact(m.commentStore.All())
+		} else {
+			exported = comments.ExportStandard(m.commentStore.All())
+		}
+		content = lipgloss.NewStyle().
+			Foreground(colorText).
+			Padding(0, 1).
+			Render(exported)
+	}
+
+	// Truncate content lines to fit panel height
+	contentLines := strings.Split(content, "\n")
+	availableHeight := height - 2 // minus separator and title
+	if len(contentLines) > availableHeight {
+		contentLines = contentLines[:availableHeight]
+	}
+	// Pad to fill height
+	for len(contentLines) < availableHeight {
+		contentLines = append(contentLines, "")
+	}
+
+	return separator + "\n" + title + "\n" + strings.Join(contentLines, "\n")
 }
 
 // fileListWidth returns the width allocated to the file list pane.
@@ -1110,11 +1241,17 @@ func (m model) renderStatus() string {
 		)
 	}
 
+	// Flash message
+	flashStr := ""
+	if m.flashMsg != "" {
+		flashStr = "  " + lipgloss.NewStyle().Foreground(colorGreen).Bold(true).Render(m.flashMsg)
+	}
+
 	style := lipgloss.NewStyle().
 		Foreground(colorMuted).
 		Background(colorHeaderBg).
 		Padding(0, 1).
 		Width(m.width)
 
-	return style.Render(modeStr + "  " + hints + countStr)
+	return style.Render(modeStr + "  " + hints + countStr + flashStr)
 }
