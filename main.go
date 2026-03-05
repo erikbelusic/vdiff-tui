@@ -12,6 +12,7 @@ import (
 
 	"github.com/erikbelusic/vdiff-tui/diff"
 	gitpkg "github.com/erikbelusic/vdiff-tui/git"
+	"github.com/erikbelusic/vdiff-tui/highlight"
 )
 
 // version is set at build time via -ldflags.
@@ -126,6 +127,7 @@ type model struct {
 	diffCursorY   int // cursor position (line index) in diff view
 	diffLines     []diffLine // flattened lines for rendering
 	diffErr       string
+	highlighter   *highlight.Highlighter
 
 	// Pane focus
 	activePane pane
@@ -222,6 +224,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.diffErr = msg.err.Error()
 			m.diffFiles = nil
 			m.diffLines = nil
+			m.highlighter = nil
 		} else {
 			m.diffRaw = msg.raw
 			m.diffFiles = diff.Parse(msg.raw)
@@ -229,6 +232,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.diffScrollY = 0
 			m.diffCursorY = 0
 			m.diffErr = ""
+			// Create highlighter based on the selected file's path
+			if m.fileIdx < len(m.files) {
+				m.highlighter = highlight.New(m.files[m.fileIdx].Path)
+			}
 		}
 		return m, nil
 	}
@@ -413,6 +420,39 @@ func flattenDiffLines(files []diff.File) []diffLine {
 		}
 	}
 	return lines
+}
+
+// truncateToWidth truncates a string (possibly containing ANSI sequences) to a
+// given visible width. This is a simple approach that falls back to raw truncation
+// if the string doesn't contain escape sequences.
+func truncateToWidth(s string, maxWidth int) string {
+	if lipgloss.Width(s) <= maxWidth {
+		return s
+	}
+	// For strings with ANSI codes, truncate rune by rune checking width
+	result := []rune{}
+	w := 0
+	inEscape := false
+	for _, r := range s {
+		if r == '\x1b' {
+			inEscape = true
+			result = append(result, r)
+			continue
+		}
+		if inEscape {
+			result = append(result, r)
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+				inEscape = false
+			}
+			continue
+		}
+		w++
+		if w > maxWidth {
+			break
+		}
+		result = append(result, r)
+	}
+	return string(result)
 }
 
 // --- Styles ---
@@ -708,11 +748,18 @@ func (m model) renderDiffLine(dl diffLine, width int, isCursor bool) string {
 		}
 	}
 
-	// Truncate content to fit width
-	contentWidth := width - gutterWidth*2 - 2 // 2 gutters + prefix + padding
+	// Apply syntax highlighting to content, then truncate
 	content := dl.text
-	if contentWidth > 0 && len(content) > contentWidth {
-		content = content[:contentWidth]
+	if m.highlighter != nil && dl.lineType == diff.LineContext {
+		// Only apply full highlighting to context lines — add/delete lines
+		// keep their green/red foreground for clarity
+		content = m.highlighter.Highlight(content)
+	}
+
+	contentWidth := width - gutterWidth*2 - 2 // 2 gutters + prefix + padding
+	if contentWidth > 0 && lipgloss.Width(content) > contentWidth {
+		// Truncate by visible width (accounts for ANSI sequences)
+		content = truncateToWidth(content, contentWidth)
 	}
 
 	line := lineStyle.Width(width - gutterWidth*2).Render(prefix + content)
