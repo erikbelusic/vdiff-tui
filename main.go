@@ -51,10 +51,14 @@ func main() {
 	}
 }
 
+// startCompact is set by --compact flag during arg parsing.
+var startCompact bool
+
 // parseArgs processes CLI arguments and returns the resolved repo path.
-// Handles --help, --version flags and an optional positional path argument.
+// Handles --help, --version, --compact flags and an optional positional path argument.
 func parseArgs() (string, error) {
 	args := os.Args[1:]
+	var positional string
 
 	for _, arg := range args {
 		switch arg {
@@ -64,11 +68,17 @@ func parseArgs() (string, error) {
 		case "--version", "-v":
 			fmt.Printf("vdiff %s\n", version)
 			os.Exit(0)
+		case "--compact":
+			startCompact = true
+		default:
+			if positional == "" && arg != "" && arg[0] != '-' {
+				positional = arg
+			}
 		}
 	}
 
-	if len(args) > 0 && args[0] != "" && args[0][0] != '-' {
-		return filepath.Abs(args[0])
+	if positional != "" {
+		return filepath.Abs(positional)
 	}
 
 	return os.Getwd()
@@ -86,7 +96,8 @@ Arguments:
 
 Flags:
   -h, --help       Show this help message
-  -v, --version    Show version`)
+  -v, --version    Show version
+      --compact    Start in compact export mode`)
 }
 
 // validateGitRepo checks that the given path is a directory containing a git repository.
@@ -161,6 +172,7 @@ type model struct {
 	// Prompt panel state
 	showPrompt   bool
 	compactMode  bool
+	showHelp     bool
 	flashMsg     string    // temporary status message (e.g., "Copied!")
 	flashExpiry  time.Time // when the flash message should disappear
 }
@@ -185,6 +197,7 @@ func newModel(repoPath string) model {
 		activePane:   fileListPane,
 		mode:         modeNormal,
 		commentStore: comments.NewStore(),
+		compactMode:  startCompact,
 	}
 }
 
@@ -355,6 +368,14 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "f":
 		if m.showPrompt {
 			m.compactMode = !m.compactMode
+			return m, nil
+		}
+	case "?":
+		m.showHelp = !m.showHelp
+		return m, nil
+	case "escape":
+		if m.showHelp {
+			m.showHelp = false
 			return m, nil
 		}
 	}
@@ -764,6 +785,10 @@ var (
 func (m model) View() string {
 	if m.width == 0 {
 		return ""
+	}
+
+	if m.showHelp {
+		return m.renderHelp()
 	}
 
 	header := m.renderHeader()
@@ -1233,6 +1258,79 @@ func (m model) renderCommentInput(width int) []string {
 	}
 
 	return lines
+}
+
+// renderHelp renders a full-screen keybinding help overlay.
+func (m model) renderHelp() string {
+	title := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(colorAccent).
+		Render("Keybindings")
+
+	subtitle := lipgloss.NewStyle().
+		Foreground(colorMuted).
+		Render("Press ? or Esc to close")
+
+	keyStyle := lipgloss.NewStyle().
+		Foreground(colorAccent).
+		Bold(true).
+		Width(16)
+
+	descStyle := lipgloss.NewStyle().
+		Foreground(colorText)
+
+	bindings := []struct{ key, desc string }{
+		{"j / k / ↑ / ↓", "Navigate up/down"},
+		{"← / → / Tab", "Switch pane"},
+		{"Enter", "Open file diff"},
+		{"g / G", "Top / Bottom"},
+		{"PgUp / PgDn", "Page up / down"},
+		{"n / N", "Next / Previous hunk"},
+		{"", ""},
+		{"c", "Comment on current line"},
+		{"v", "Visual select (range)"},
+		{"e", "Edit comment at cursor"},
+		{"d", "Delete comment at cursor"},
+		{"Ctrl+S", "Save comment"},
+		{"Escape", "Cancel / Close"},
+		{"", ""},
+		{"p", "Toggle prompt panel"},
+		{"y", "Copy prompt to clipboard"},
+		{"f", "Toggle compact format"},
+		{"", ""},
+		{"r", "Refresh file list"},
+		{"q", "Quit"},
+		{"?", "Toggle this help"},
+	}
+
+	var lines []string
+	lines = append(lines, "")
+	lines = append(lines, "  "+title)
+	lines = append(lines, "  "+subtitle)
+	lines = append(lines, "")
+
+	for _, b := range bindings {
+		if b.key == "" {
+			lines = append(lines, "")
+			continue
+		}
+		lines = append(lines, "  "+keyStyle.Render(b.key)+descStyle.Render(b.desc))
+	}
+
+	content := strings.Join(lines, "\n")
+
+	// Center vertically
+	contentHeight := len(lines)
+	topPad := (m.height - contentHeight) / 2
+	if topPad < 0 {
+		topPad = 0
+	}
+
+	return lipgloss.NewStyle().
+		Width(m.width).
+		Height(m.height).
+		PaddingTop(topPad).
+		Render(content)
 }
 
 // renderStatus renders the bottom status bar with mode indicator and key hints.
