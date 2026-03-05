@@ -10,6 +10,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/atotto/clipboard"
@@ -40,6 +42,7 @@ func main() {
 	p := tea.NewProgram(
 		newModel(repoPath),
 		tea.WithAltScreen(),
+		tea.WithReportFocus(),
 	)
 
 	if _, err := p.Run(); err != nil {
@@ -203,6 +206,9 @@ type fileDiffMsg struct {
 // clearFlashMsg signals that a flash message should be cleared.
 type clearFlashMsg struct{}
 
+// sigcontMsg signals that the process resumed from a suspend (SIGCONT).
+type sigcontMsg struct{}
+
 // --- Commands ---
 
 // loadGitData fetches the current branch and changed files list.
@@ -211,6 +217,18 @@ func loadGitData(repoPath string) tea.Cmd {
 		branch, _ := gitpkg.CurrentBranch(repoPath)
 		files, err := gitpkg.ChangedFiles(repoPath)
 		return gitDataMsg{branch: branch, files: files, err: err}
+	}
+}
+
+// waitForSIGCONT returns a command that waits for a SIGCONT signal (sent when
+// the process resumes after Ctrl+Z / fg) and emits a sigcontMsg.
+func waitForSIGCONT() tea.Cmd {
+	return func() tea.Msg {
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, syscall.SIGCONT)
+		<-sig
+		signal.Stop(sig)
+		return sigcontMsg{}
 	}
 }
 
@@ -226,7 +244,7 @@ func loadFileDiff(repoPath string, file gitpkg.ChangedFile) tea.Cmd {
 func (m model) Init() tea.Cmd {
 	// Load saved comments (non-blocking, errors are silently ignored)
 	_ = m.commentStore.Load(m.repoPath)
-	return loadGitData(m.repoPath)
+	return tea.Batch(loadGitData(m.repoPath), waitForSIGCONT())
 }
 
 // Update handles incoming messages (key presses, window resizes) and returns
@@ -265,6 +283,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case clearFlashMsg:
 		m.flashMsg = ""
 		return m, nil
+
+	case sigcontMsg:
+		// Process resumed from suspend — refresh and listen again
+		return m, tea.Batch(loadGitData(m.repoPath), waitForSIGCONT())
+
+	case tea.FocusMsg:
+		// Terminal window/tab regained focus — refresh
+		return m, loadGitData(m.repoPath)
 
 	case fileDiffMsg:
 		if msg.err != nil {
