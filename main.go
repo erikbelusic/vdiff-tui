@@ -246,7 +246,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "q":
 		return m, tea.Quit
-	case "tab", "shift+tab":
+	case "tab", "shift+tab", "left", "right":
 		m.activePane = togglePane(m.activePane)
 		return m, nil
 	case "r":
@@ -429,7 +429,7 @@ var (
 	colorRed       = lipgloss.Color("#f85149")
 	colorAddBg     = lipgloss.Color("#12261e")
 	colorDeleteBg  = lipgloss.Color("#2d1316")
-	colorCursorBg  = lipgloss.Color("#1f2937")
+	colorCursorBg  = lipgloss.Color("#30415e")
 	colorHunkBg    = lipgloss.Color("#1c2333")
 )
 
