@@ -33,9 +33,17 @@ go run . [path-to-repo]
 
 See `TODO.md` for the phased implementation plan. Currently on Phase 2.
 
+## Project Structure
+
+- `main.go` — entry point, CLI parsing, git validation, Bubble Tea model
+- `git/` — git command execution (status, diff, branch)
+- `diff/` — unified diff parser (File/Hunk/Line types)
+
 ## Conventions
 
-- Single `main.go` until the codebase warrants splitting into packages
+- All exported and unexported functions must have a `//` doc comment directly above the declaration, starting with the function name
+- All exported types and constants must have doc comments
+- Packages must have a `// Package <name> ...` doc comment above the `package` declaration
 - Shell out to `git` CLI for all git operations (no libgit2)
 - GitHub Dark theme colors: bg `#0d1117`, secondary `#161b22`, text `#e6edf3`, muted `#8b949e`
 - Commit messages should be concise and describe the "why"
