@@ -10,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/erikbelusic/vdiff-tui/comments"
 	"github.com/erikbelusic/vdiff-tui/diff"
 	gitpkg "github.com/erikbelusic/vdiff-tui/git"
 	"github.com/erikbelusic/vdiff-tui/highlight"
@@ -107,6 +108,17 @@ const (
 	diffViewPane
 )
 
+// mode represents the current interaction mode.
+type mode int
+
+const (
+	modeNormal  mode = iota
+	modeVisual       // selecting a range of lines
+	modeComment      // typing a comment
+	modeEdit         // editing an existing comment
+)
+
+
 // model is the top-level Bubble Tea model holding all application state.
 type model struct {
 	repoPath string
@@ -131,6 +143,13 @@ type model struct {
 
 	// Pane focus
 	activePane pane
+
+	// Mode and commenting state
+	mode          mode
+	commentStore  *comments.Store
+	visualStart   int      // start of visual selection (diffLines index)
+	commentInput  string   // text being typed
+	editCommentID int      // ID of comment being edited
 }
 
 // diffLine is a flattened representation of a line in the diff viewer,
@@ -148,9 +167,11 @@ type diffLine struct {
 // newModel creates the initial model for the given repository path.
 func newModel(repoPath string) model {
 	return model{
-		repoPath:   repoPath,
-		repoName:   filepath.Base(repoPath),
-		activePane: fileListPane,
+		repoPath:     repoPath,
+		repoName:     filepath.Base(repoPath),
+		activePane:   fileListPane,
+		mode:         modeNormal,
+		commentStore: comments.NewStore(),
 	}
 }
 
@@ -245,9 +266,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // handleKey processes keyboard input based on the active pane and mode.
 func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Comment/edit mode handles its own input
+	if m.mode == modeComment || m.mode == modeEdit {
+		return m.handleCommentInput(msg)
+	}
+
 	key := msg.String()
 
-	// Global keybindings
+	// Visual mode
+	if m.mode == modeVisual {
+		return m.handleVisualKey(key)
+	}
+
+	// Global keybindings (normal mode)
 	switch key {
 	case "ctrl+c":
 		return m, tea.Quit
@@ -355,8 +386,168 @@ func (m model) handleDiffViewKey(key string) (tea.Model, tea.Cmd) {
 	case "N":
 		m.jumpToNextHunk(-1)
 		m.ensureCursorVisible(viewHeight)
+	case "c":
+		// Comment on current line (single line)
+		if m.diffCursorY < len(m.diffLines) && !m.diffLines[m.diffCursorY].isHunkHeader {
+			m.visualStart = m.diffCursorY
+			m.mode = modeComment
+			m.commentInput = ""
+		}
+	case "v":
+		// Enter visual selection mode
+		if m.diffCursorY < len(m.diffLines) && !m.diffLines[m.diffCursorY].isHunkHeader {
+			m.mode = modeVisual
+			m.visualStart = m.diffCursorY
+		}
+	case "e":
+		// Edit comment at current line
+		if m.diffCursorY < len(m.diffLines) && m.fileIdx < len(m.files) {
+			dl := m.diffLines[m.diffCursorY]
+			if !dl.isHunkHeader {
+				lineID := comments.LineID(dl.hunkIdx, dl.lineIdx)
+				if c := m.commentStore.CommentAtLineID(m.files[m.fileIdx].Path, lineID); c != nil {
+					m.mode = modeEdit
+					m.commentInput = c.Text
+					m.editCommentID = c.ID
+					m.visualStart = m.diffCursorY
+				}
+			}
+		}
+	case "d":
+		// Delete comment at current line
+		if m.diffCursorY < len(m.diffLines) && m.fileIdx < len(m.files) {
+			dl := m.diffLines[m.diffCursorY]
+			if !dl.isHunkHeader {
+				lineID := comments.LineID(dl.hunkIdx, dl.lineIdx)
+				if c := m.commentStore.CommentAtLineID(m.files[m.fileIdx].Path, lineID); c != nil {
+					m.commentStore.Delete(c.ID)
+				}
+			}
+		}
 	}
 	return m, nil
+}
+
+// handleVisualKey processes keyboard input during visual (range) selection mode.
+func (m model) handleVisualKey(key string) (tea.Model, tea.Cmd) {
+	viewHeight := m.diffViewHeight()
+
+	switch key {
+	case "j", "down":
+		if m.diffCursorY < len(m.diffLines)-1 {
+			m.diffCursorY++
+			// Skip hunk headers in visual mode
+			for m.diffCursorY < len(m.diffLines) && m.diffLines[m.diffCursorY].isHunkHeader {
+				m.diffCursorY++
+			}
+			m.ensureCursorVisible(viewHeight)
+		}
+	case "k", "up":
+		if m.diffCursorY > 0 {
+			m.diffCursorY--
+			for m.diffCursorY > 0 && m.diffLines[m.diffCursorY].isHunkHeader {
+				m.diffCursorY--
+			}
+			m.ensureCursorVisible(viewHeight)
+		}
+	case "c":
+		// Confirm selection and open comment input
+		m.mode = modeComment
+		m.commentInput = ""
+	case "escape":
+		m.mode = modeNormal
+	}
+
+	return m, nil
+}
+
+// handleCommentInput processes keyboard input while typing a comment.
+func (m model) handleCommentInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	key := msg.String()
+
+	switch key {
+	case "ctrl+s":
+		// Save comment
+		if strings.TrimSpace(m.commentInput) != "" {
+			m.saveComment()
+		}
+		m.mode = modeNormal
+		m.commentInput = ""
+	case "escape":
+		m.mode = modeNormal
+		m.commentInput = ""
+	case "enter":
+		m.commentInput += "\n"
+	case "backspace":
+		if len(m.commentInput) > 0 {
+			m.commentInput = m.commentInput[:len(m.commentInput)-1]
+		}
+	case "ctrl+c":
+		return m, tea.Quit
+	default:
+		// Only add printable characters
+		if len(key) == 1 || (len(msg.Runes) > 0) {
+			m.commentInput += string(msg.Runes)
+		}
+	}
+
+	return m, nil
+}
+
+// saveComment creates or updates a comment from the current selection and input.
+func (m *model) saveComment() {
+	if m.fileIdx >= len(m.files) {
+		return
+	}
+	filePath := m.files[m.fileIdx].Path
+
+	// Determine selection range
+	start, end := m.visualStart, m.diffCursorY
+	if start > end {
+		start, end = end, start
+	}
+
+	// Collect line IDs, line numbers, and code from selection
+	var lineIDs []string
+	var lineNums []int
+	var codeLines []string
+
+	for i := start; i <= end; i++ {
+		if i >= len(m.diffLines) || m.diffLines[i].isHunkHeader {
+			continue
+		}
+		dl := m.diffLines[i]
+		lineIDs = append(lineIDs, comments.LineID(dl.hunkIdx, dl.lineIdx))
+		if dl.newNum > 0 {
+			lineNums = append(lineNums, dl.newNum)
+		} else if dl.oldNum > 0 {
+			lineNums = append(lineNums, dl.oldNum)
+		}
+		prefix := " "
+		switch dl.lineType {
+		case diff.LineAdd:
+			prefix = "+"
+		case diff.LineDelete:
+			prefix = "-"
+		}
+		codeLines = append(codeLines, prefix+dl.text)
+	}
+
+	if len(lineIDs) == 0 {
+		return
+	}
+
+	if m.mode == modeEdit {
+		m.commentStore.Update(m.editCommentID, m.commentInput)
+	} else {
+		m.commentStore.Add(
+			filePath,
+			lineIDs,
+			comments.FormatLineNum(lineNums),
+			comments.CollectCode(codeLines),
+			m.commentInput,
+		)
+	}
 }
 
 // ensureCursorVisible adjusts scroll so the cursor is within the visible area.
@@ -470,7 +661,9 @@ var (
 	colorAddBg     = lipgloss.Color("#12261e")
 	colorDeleteBg  = lipgloss.Color("#2d1316")
 	colorCursorBg  = lipgloss.Color("#30415e")
+	colorSelectBg  = lipgloss.Color("#1a3a5c")
 	colorHunkBg    = lipgloss.Color("#1c2333")
+	colorPurple    = lipgloss.Color("#8957e5")
 )
 
 // View renders the entire TUI to a string for display.
@@ -630,7 +823,16 @@ func (m model) renderFileEntry(f gitpkg.ChangedFile, selected, paneActive bool, 
 		display = "…" + display[len(display)-available+1:]
 	}
 
-	entry := fmt.Sprintf(" %s %s%s", statusStyle.Render(f.Status), display, stats)
+	// Comment count badge
+	commentBadge := ""
+	commentCount := m.commentStore.CountForFile(f.Path)
+	if commentCount > 0 {
+		commentBadge = lipgloss.NewStyle().Foreground(colorPurple).Render(
+			fmt.Sprintf(" [%d]", commentCount),
+		)
+	}
+
+	entry := fmt.Sprintf(" %s %s%s%s", statusStyle.Render(f.Status), display, stats, commentBadge)
 
 	style := lipgloss.NewStyle().Width(width)
 	if selected && paneActive {
@@ -675,12 +877,49 @@ func (m model) renderDiffView(width, height int) string {
 		return emptyStyle.Render("No diff available")
 	}
 
-	// Render visible lines
+	// Get current file path for comment lookups
+	var currentFilePath string
+	if m.fileIdx < len(m.files) {
+		currentFilePath = m.files[m.fileIdx].Path
+	}
+
+	// Determine visual selection range
+	selStart, selEnd := -1, -1
+	if m.mode == modeVisual || m.mode == modeComment {
+		selStart, selEnd = m.visualStart, m.diffCursorY
+		if selStart > selEnd {
+			selStart, selEnd = selEnd, selStart
+		}
+	}
+
+	// Render visible lines with inline comments
 	var lines []string
 	for i := m.diffScrollY; i < m.diffScrollY+height && i < len(m.diffLines); i++ {
 		dl := m.diffLines[i]
 		isCursor := isActive && i == m.diffCursorY
-		lines = append(lines, m.renderDiffLine(dl, width, isCursor))
+		isSelected := i >= selStart && i <= selEnd
+		isCommented := false
+		if !dl.isHunkHeader && currentFilePath != "" {
+			lineID := comments.LineID(dl.hunkIdx, dl.lineIdx)
+			isCommented = m.commentStore.HasLineID(currentFilePath, lineID)
+		}
+
+		lines = append(lines, m.renderDiffLine(dl, width, isCursor, isSelected, isCommented))
+
+		// Render inline comment below the last line of a comment's range
+		if !dl.isHunkHeader && currentFilePath != "" {
+			lineID := comments.LineID(dl.hunkIdx, dl.lineIdx)
+			if c := m.commentStore.CommentAtLineID(currentFilePath, lineID); c != nil {
+				commentLine := m.renderInlineComment(c, width)
+				lines = append(lines, commentLine)
+			}
+		}
+
+		// Render comment input below the selection end
+		if (m.mode == modeComment || m.mode == modeEdit) && i == selEnd {
+			inputLines := m.renderCommentInput(width)
+			lines = append(lines, inputLines...)
+		}
 	}
 
 	// Pad remaining lines
@@ -688,11 +927,16 @@ func (m model) renderDiffView(width, height int) string {
 		lines = append(lines, lipgloss.NewStyle().Width(width).Render(""))
 	}
 
+	// Truncate to fit height
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+
 	return strings.Join(lines, "\n")
 }
 
 // renderDiffLine renders a single line in the diff viewer.
-func (m model) renderDiffLine(dl diffLine, width int, isCursor bool) string {
+func (m model) renderDiffLine(dl diffLine, width int, isCursor, isSelected, isCommented bool) string {
 	if dl.isHunkHeader {
 		style := lipgloss.NewStyle().
 			Foreground(colorAccent).
@@ -703,6 +947,12 @@ func (m model) renderDiffLine(dl diffLine, width int, isCursor bool) string {
 			style = style.Background(colorCursorBg)
 		}
 		return style.Render(" " + dl.text)
+	}
+
+	// Comment gutter marker
+	gutterMarker := " "
+	if isCommented {
+		gutterMarker = lipgloss.NewStyle().Foreground(colorPurple).Render("┃")
 	}
 
 	// Line numbers
@@ -717,7 +967,7 @@ func (m model) renderDiffLine(dl diffLine, width int, isCursor bool) string {
 	}
 
 	gutterStyle := lipgloss.NewStyle().Foreground(colorMuted)
-	gutter := gutterStyle.Render(oldNum) + gutterStyle.Render(newNum)
+	gutter := gutterMarker + gutterStyle.Render(oldNum) + gutterStyle.Render(newNum)
 
 	// Prefix and content
 	var prefix string
@@ -727,7 +977,9 @@ func (m model) renderDiffLine(dl diffLine, width int, isCursor bool) string {
 	case diff.LineAdd:
 		prefix = "+"
 		lineStyle = lipgloss.NewStyle().Foreground(colorGreen)
-		if isCursor {
+		if isSelected {
+			lineStyle = lineStyle.Background(colorSelectBg)
+		} else if isCursor {
 			lineStyle = lineStyle.Background(colorCursorBg)
 		} else {
 			lineStyle = lineStyle.Background(colorAddBg)
@@ -735,7 +987,9 @@ func (m model) renderDiffLine(dl diffLine, width int, isCursor bool) string {
 	case diff.LineDelete:
 		prefix = "-"
 		lineStyle = lipgloss.NewStyle().Foreground(colorRed)
-		if isCursor {
+		if isSelected {
+			lineStyle = lineStyle.Background(colorSelectBg)
+		} else if isCursor {
 			lineStyle = lineStyle.Background(colorCursorBg)
 		} else {
 			lineStyle = lineStyle.Background(colorDeleteBg)
@@ -743,7 +997,9 @@ func (m model) renderDiffLine(dl diffLine, width int, isCursor bool) string {
 	default:
 		prefix = " "
 		lineStyle = lipgloss.NewStyle().Foreground(colorText)
-		if isCursor {
+		if isSelected {
+			lineStyle = lineStyle.Background(colorSelectBg)
+		} else if isCursor {
 			lineStyle = lineStyle.Background(colorCursorBg)
 		}
 	}
@@ -751,30 +1007,94 @@ func (m model) renderDiffLine(dl diffLine, width int, isCursor bool) string {
 	// Apply syntax highlighting to content, then truncate
 	content := dl.text
 	if m.highlighter != nil && dl.lineType == diff.LineContext {
-		// Only apply full highlighting to context lines — add/delete lines
-		// keep their green/red foreground for clarity
 		content = m.highlighter.Highlight(content)
 	}
 
-	contentWidth := width - gutterWidth*2 - 2 // 2 gutters + prefix + padding
+	contentWidth := width - gutterWidth*2 - 3 // 2 gutters + marker + prefix + padding
 	if contentWidth > 0 && lipgloss.Width(content) > contentWidth {
-		// Truncate by visible width (accounts for ANSI sequences)
 		content = truncateToWidth(content, contentWidth)
 	}
 
-	line := lineStyle.Width(width - gutterWidth*2).Render(prefix + content)
+	line := lineStyle.Width(width - gutterWidth*2 - 1).Render(prefix + content)
 
 	return gutter + line
 }
 
-// renderStatus renders the bottom status bar with key hints.
+// renderInlineComment renders a saved comment below its associated diff line.
+func (m model) renderInlineComment(c *comments.Comment, width int) string {
+	style := lipgloss.NewStyle().
+		Foreground(colorPurple).
+		Width(width).
+		PaddingLeft(12) // align with code content
+
+	text := fmt.Sprintf("💬 %s", c.Text)
+	// Handle multiline comments
+	text = strings.ReplaceAll(text, "\n", "\n"+strings.Repeat(" ", 12)+"   ")
+	return style.Render(text)
+}
+
+// renderCommentInput renders the text input area for typing a comment.
+func (m model) renderCommentInput(width int) []string {
+	var lines []string
+
+	borderStyle := lipgloss.NewStyle().
+		Foreground(colorPurple).
+		Width(width).
+		PaddingLeft(12)
+
+	label := "Comment (Ctrl+S to save, Esc to cancel):"
+	if m.mode == modeEdit {
+		label = "Edit comment (Ctrl+S to save, Esc to cancel):"
+	}
+	lines = append(lines, borderStyle.Render(label))
+
+	inputStyle := lipgloss.NewStyle().
+		Foreground(colorText).
+		Background(lipgloss.Color("#1c1c2e")).
+		Width(width - 14).
+		PaddingLeft(1)
+
+	// Show input text with cursor
+	displayText := m.commentInput + "█"
+	for _, inputLine := range strings.Split(displayText, "\n") {
+		lines = append(lines, lipgloss.NewStyle().PaddingLeft(12).Render(
+			inputStyle.Render(inputLine),
+		))
+	}
+
+	return lines
+}
+
+// renderStatus renders the bottom status bar with mode indicator and key hints.
 func (m model) renderStatus() string {
-	var hints string
-	switch m.activePane {
-	case fileListPane:
-		hints = "j/k: navigate  ·  enter: view diff  ·  tab: switch pane  ·  r: refresh  ·  q: quit"
-	case diffViewPane:
-		hints = "j/k: scroll  ·  n/N: next/prev hunk  ·  g/G: top/bottom  ·  tab: switch pane  ·  q: quit"
+	var modeStr, hints string
+
+	switch m.mode {
+	case modeVisual:
+		modeStr = lipgloss.NewStyle().Foreground(colorAccent).Bold(true).Render("VISUAL")
+		hints = "j/k: extend selection  ·  c: comment  ·  esc: cancel"
+	case modeComment:
+		modeStr = lipgloss.NewStyle().Foreground(colorPurple).Bold(true).Render("COMMENT")
+		hints = "type comment  ·  ctrl+s: save  ·  esc: cancel"
+	case modeEdit:
+		modeStr = lipgloss.NewStyle().Foreground(colorPurple).Bold(true).Render("EDIT")
+		hints = "edit comment  ·  ctrl+s: save  ·  esc: cancel"
+	default:
+		modeStr = lipgloss.NewStyle().Foreground(colorMuted).Render("NORMAL")
+		switch m.activePane {
+		case fileListPane:
+			hints = "j/k: navigate  ·  enter: view diff  ·  tab: switch pane  ·  r: refresh  ·  q: quit"
+		case diffViewPane:
+			hints = "j/k: scroll  ·  c: comment  ·  v: select range  ·  e/d: edit/delete  ·  n/N: hunks  ·  q: quit"
+		}
+	}
+
+	// Comment count
+	countStr := ""
+	if m.commentStore.Count() > 0 {
+		countStr = lipgloss.NewStyle().Foreground(colorPurple).Render(
+			fmt.Sprintf("  [%d comments]", m.commentStore.Count()),
+		)
 	}
 
 	style := lipgloss.NewStyle().
@@ -783,5 +1103,5 @@ func (m model) renderStatus() string {
 		Padding(0, 1).
 		Width(m.width)
 
-	return style.Render(hints)
+	return style.Render(modeStr + "  " + hints + countStr)
 }
